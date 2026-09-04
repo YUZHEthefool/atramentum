@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    background: #f5f1e8;
+  }
+
+  ::selection {
+    background: #c03f2b;
+    color: #f5f1e8;
+  }
+}
