@@ -1,0 +1,117 @@
+@tailwind components;
+
+/* 墨痕阅读排印：.prose 基础 + ASCII 碑刻框线 + 表格横向滚动 */
+@layer components {
+  /* 书籍文本（pdf 逐页 / 备用纯文本）：舒展行距、限宽、保留原始换行 */
+  .book-text {
+    @apply text-[16px] leading-[2] text-ink;
+    max-width: 42em;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+  }
+  .prose {
+    @apply text-[15px] leading-[1.85] text-ink;
+    max-width: 76ch;
+  }
+
+  .prose h1 {
+    @apply mt-2 mb-6 border-b border-ink/15 pb-4 font-song text-[28px] font-bold tracking-wide text-ink;
+  }
+  .prose h2 {
+    @apply mt-10 mb-4 border-l-4 border-cinnabar pl-3 font-song text-[22px] font-bold text-ink;
+  }
+  .prose h3 {
+    @apply mt-8 mb-3 font-song text-[18px] font-semibold text-ink;
+  }
+  .prose h4 {
+    @apply mt-6 mb-2 font-song text-[16px] font-semibold text-ink-soft;
+  }
+
+  .prose p {
+    @apply my-4;
+  }
+
+  .prose a {
+    @apply text-cinnabar underline decoration-cinnabar/40 underline-offset-4 transition hover:decoration-cinnabar;
+  }
+  .prose a.link-blocked {
+    @apply cursor-not-allowed text-ink-faint decoration-ink-faint/40;
+  }
+
+  .prose strong {
+    @apply font-semibold text-ink;
+  }
+
+  .prose blockquote {
+    @apply my-5 border-l-4 border-cinnabar/60 bg-ink/[0.03] px-4 py-1 text-ink-soft;
+  }
+  .prose blockquote p {
+    @apply my-2;
+  }
+
+  .prose ul {
+    @apply my-4 list-disc space-y-1 pl-6;
+  }
+  .prose ol {
+    @apply my-4 list-decimal space-y-1 pl-6;
+  }
+  .prose li::marker {
+    @apply text-cinnabar/70;
+  }
+
+  /* 行内代码 */
+  .prose :not(pre) > code {
+    @apply rounded bg-ink/[0.06] px-1.5 py-0.5 font-mono text-[0.86em] text-ink;
+  }
+
+  /* 普通代码块 */
+  .prose pre.code {
+    @apply my-5 overflow-x-auto rounded-md bg-[#26251f] p-4 font-mono text-[13px] leading-[1.7] text-[#e8e4d8];
+  }
+
+  /* ASCII 图：碑刻风——纸底、框线、等宽不折行、绝不染色 */
+  .prose pre.ascii {
+    @apply my-5 overflow-x-auto rounded-sm border border-ink/25 bg-[#efe9dc] px-4 py-3
+      font-mono text-[13px] leading-[1.45] tracking-normal text-ink;
+    white-space: pre;
+    word-break: normal;
+    overflow-wrap: normal;
+    tab-size: 4;
+  }
+  .prose pre.ascii code {
+    @apply bg-transparent p-0 font-mono text-inherit;
+  }
+
+  /* 表格 */
+  .prose .table-wrap {
+    @apply my-5 overflow-x-auto;
+  }
+  .prose table {
+    @apply w-full min-w-max border-collapse text-[14px];
+  }
+  .prose th {
+    @apply border border-ink/20 bg-ink/[0.05] px-3 py-2 text-left font-semibold text-ink;
+  }
+  .prose td {
+    @apply border border-ink/15 px-3 py-2 align-top text-ink-soft;
+  }
+
+  .prose hr {
+    @apply my-8 border-t border-dashed border-ink/25;
+  }
+
+  .prose img {
+    @apply my-5 max-w-full rounded;
+  }
+}
+
+/* highlight.js 主题（暗底代码块用的最小子集，自绘） */
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-section { color: #e0907a; }
+.hljs-string, .hljs-title, .hljs-name, .hljs-attr { color: #b8c98a; }
+.hljs-comment, .hljs-quote { color: #8a8778; font-style: italic; }
+.hljs-number, .hljs-symbol, .hljs-bullet { color: #d4b06a; }
+.hljs-function .hljs-title, .hljs-title.function_ { color: #9ab8d8; }
+.hljs-type, .hljs-class .hljs-title, .hljs-title.class_ { color: #d8c09a; }
+.hljs-built_in, .hljs-builtin-name { color: #c9a8d8; }
+.hljs-meta, .hljs-doctag { color: #8a8778; }
+.hljs-variable, .hljs-template-variable { color: #e8e4d8; }
