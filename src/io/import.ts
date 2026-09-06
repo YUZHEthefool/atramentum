@@ -132,7 +132,7 @@ function allowedExt(path: string): boolean {
 }
 
 /** 若全部条目共享同一个「文件夹根」（无扩展名），剥掉它——压缩整门课的包常见此形态 */
-function stripCommonRoot(entries: RawEntry[]): RawEntry[] {
+export function stripCommonRoot(entries: RawEntry[]): RawEntry[] {
   if (entries.length === 0) return entries
   const first = entries[0].path.split('/')[0]
   if (!first || first.includes('.')) return entries
