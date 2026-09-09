@@ -6,6 +6,7 @@ import {
   fromRar,
   fromTarGz,
   fromZip,
+  guessCourseTitle,
   ingestBookFromEpub,
   ingestBookFromPdf,
   ingestCourse,
@@ -18,7 +19,7 @@ import { Overlay } from './common/Overlay'
 const inputCls =
   'w-full border border-ink/20 bg-paper px-2.5 py-1.5 text-sm text-ink outline-none transition focus:border-cinnabar'
 
-type IngestFn = () => Promise<{ meta: { id: string } }>
+type IngestFn = (title: string) => Promise<{ meta: { id: string } }>
 
 export function ImportDialog({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {
   const [busy, setBusy] = useState(false)
@@ -28,6 +29,8 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
   const [category, setCategory] = useState('')
   const categories = useCategoryStore((s) => s.order)
   const assignTo = useCategoryStore((s) => s.assignTo)
+  // 书名：从所选文件/文件夹名推断，可改；书籍（epub/pdf）自带书名则被其后端覆盖
+  const [title, setTitle] = useState('')
   const zipInputRef = useRef<HTMLInputElement>(null)
   const dirInputRef = useRef<HTMLInputElement>(null)
 
@@ -35,7 +38,7 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
     setBusy(true)
     setMsg('')
     try {
-      const { meta } = await ingest()
+      const { meta } = await ingest(title.trim())
       if (category) assignTo(meta.id, category)
       onImported()
       onClose()
@@ -46,19 +49,21 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
     }
   }
 
-  /** 单文件：按扩展名分流（压缩包 / EPUB / PDF） */
+  /** 单文件：按扩展名分流（压缩包 / EPUB / PDF）。压缩包的标题在解包后推断，覆盖输入框默认值 */
   const ingestArchiveOrBook = (file: File): IngestFn => {
-    if (/\.epub$/i.test(file.name)) return () => ingestBookFromEpub(file, category)
-    if (/\.pdf$/i.test(file.name)) return () => ingestBookFromPdf(file, category)
-    return async () => {
+    if (/\.epub$/i.test(file.name)) return (t) => ingestBookFromEpub(file, category, t)
+    if (/\.pdf$/i.test(file.name)) return (t) => ingestBookFromPdf(file, category, t)
+    return async (t) => {
       const data = new Uint8Array(await file.arrayBuffer())
       const raw: RawEntry[] = /\.rar$/i.test(file.name)
         ? await fromRar(file)
         : /\.zip$/i.test(file.name)
           ? fromZip(data)
           : fromTarGz(data)
+      const guessed = guessCourseTitle(raw) || t
       return ingestCourse(normalizeEntries(raw), {
         source: 'imported',
+        title: guessed,
         desc: `导入课件 · ${raw.length} 个文件`,
         category,
       })
@@ -78,10 +83,11 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
         return
       }
     }
-    void run(async () => {
+    void run(async (t) => {
       const raw = await fromFiles(items)
       return ingestCourse(normalizeEntries(raw), {
         source: 'imported',
+        title: guessCourseTitle(raw) || t,
         desc: `导入课件 · ${raw.length} 个文件`,
         category,
       })
@@ -107,6 +113,16 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
         </div>
 
         <div className="space-y-4 p-5">
+          <div>
+            <label className="mb-1 block text-sm font-semibold">书名（自动从文件名推断，可修改）</label>
+            <input
+              className={inputCls}
+              placeholder="留空则用文件 / 文件夹名"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              disabled={busy}
+            />
+          </div>
           <div>
             <label className="mb-1 block text-sm font-semibold">归入分类（可稍后在书架拖拽调整）</label>
             <select className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)}>
@@ -171,6 +187,7 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
               setMsg('请选择 zip / tar.gz / rar 压缩包或 PDF / EPUB 书籍，课件文件夹请用「选择文件夹」。')
               return
             }
+            if (!title.trim()) setTitle(guessCourseTitle([{ path: file.name, data: new Uint8Array(0) }]))
             void run(ingestArchiveOrBook(file))
           }}
         />
@@ -184,10 +201,12 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
             const files = Array.from(e.target.files ?? [])
             e.target.value = ''
             if (files.length === 0) return
-            void run(async () => {
+            if (!title.trim()) setTitle(guessCourseTitle(files.map((f) => ({ path: f.webkitRelativePath || f.name, data: new Uint8Array(0) }))))
+            void run(async (t) => {
               const raw = await fromFiles(files)
               return ingestCourse(normalizeEntries(raw), {
                 source: 'imported',
+                title: guessCourseTitle(raw) || t,
                 desc: `导入课件 · ${raw.length} 个文件`,
                 category,
               })

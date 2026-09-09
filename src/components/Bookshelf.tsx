@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { listAllCourses } from '../course'
-import { deleteCourse } from '../course/dbStore'
+import { deleteCourse, renameCourse } from '../course/dbStore'
 import type { CourseMeta } from '../types/course'
 import { COURSE_DND_MIME, UNCATEGORIZED, groupCourses, useCategoryStore } from '../store/categoryStore'
 import { SettingsDialog } from './SettingsDialog'
@@ -40,15 +40,27 @@ function CourseCard({
   categorized,
   onDelete,
   onMoveOut,
+  onRename,
 }: {
   meta: CourseMeta
   categorized: boolean
   onDelete: () => void
   onMoveOut: () => void
+  onRename: (title: string) => Promise<void>
 }) {
   const ghostRef = useRef<HTMLDivElement>(null)
+  const [renaming, setRenaming] = useState(false)
+  const [draft, setDraft] = useState(meta.title)
   const removable = meta.source !== 'builtin'
   const isBook = meta.format !== 'md'
+
+  const commitRename = async () => {
+    const name = draft.trim()
+    setRenaming(false)
+    if (!name || name === meta.title) return
+    await onRename(name)
+  }
+
   return (
     <div
       draggable
@@ -69,18 +81,71 @@ function CourseCard({
         hover:-translate-y-0.5 hover:border-cinnabar/50 hover:bg-paper-deep"
     >
       <div ref={ghostRef} aria-hidden style={{ position: 'fixed', top: -9999, left: -9999, pointerEvents: 'none' }} />
-      {removable && (
-        <button
-          className="absolute right-2 top-2 hidden h-6 w-6 items-center justify-center border border-ink/20 text-xs text-ink-faint transition hover:border-cinnabar hover:text-cinnabar group-hover:flex"
-          onClick={(e) => {
-            e.preventDefault()
-            if (window.confirm(`删除「${meta.title}」？该操作不可恢复。`)) onDelete()
-          }}
-          aria-label="删除"
-          title="删除"
-        >
-          ✕
-        </button>
+      {renaming ? (
+        <div className="mb-3 space-y-2">
+          <input
+            autoFocus
+            className="w-full border border-cinnabar/50 bg-paper px-2.5 py-1.5 text-sm text-ink outline-none"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void commitRename()
+              if (e.key === 'Escape') {
+                setDraft(meta.title)
+                setRenaming(false)
+              }
+            }}
+            aria-label="新标题"
+          />
+          <div className="flex items-center justify-end gap-2">
+            <button
+              className="border border-ink/25 px-2.5 py-1 text-xs text-ink-soft transition hover:border-cinnabar/50"
+              onClick={() => {
+                setDraft(meta.title)
+                setRenaming(false)
+              }}
+            >
+              取消
+            </button>
+            <button
+              className="bg-cinnabar px-2.5 py-1 text-xs text-paper transition hover:bg-cinnabar-deep disabled:opacity-40"
+              onClick={() => void commitRename()}
+              disabled={!draft.trim()}
+            >
+              保存
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          {removable && (
+            <div className="absolute right-2 top-2 hidden items-center gap-1 group-hover:flex">
+              <button
+                className="flex h-6 w-6 items-center justify-center border border-ink/20 bg-paper text-xs text-ink-faint transition hover:border-cinnabar hover:text-cinnabar"
+                onClick={(e) => {
+                  e.preventDefault()
+                  setDraft(meta.title)
+                  setRenaming(true)
+                }}
+                aria-label="重命名"
+                title="重命名"
+              >
+                ✎
+              </button>
+              <button
+                className="flex h-6 w-6 items-center justify-center border border-ink/20 bg-paper text-xs text-ink-faint transition hover:border-cinnabar hover:text-cinnabar"
+                onClick={(e) => {
+                  e.preventDefault()
+                  if (window.confirm(`删除「${meta.title}」？该操作不可恢复。`)) onDelete()
+                }}
+                aria-label="删除"
+                title="删除"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </>
       )}
       {categorized && (
         <button
@@ -256,6 +321,10 @@ export default function Bookshelf() {
                           void deleteCourse(c.id).then(refresh)
                         }}
                         onMoveOut={() => assignTo(c.id, '')}
+                        onRename={async (title) => {
+                          await renameCourse(c.id, title)
+                          refresh()
+                        }}
                       />
                     ))}
                   </div>

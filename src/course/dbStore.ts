@@ -57,10 +57,11 @@ function withDefaults(meta: CourseMeta): CourseMeta {
   return { ...meta, category: meta.category || '学习', format: meta.format || 'md' }
 }
 
-function makeDbStore(): CourseStore {
+function makeDbStore(source: CourseMeta['source']): CourseStore {
   return {
     async list() {
-      const all = await db.courses.toArray()
+      // imported/generated 共用一张表，必须按 source 过滤——否则每门课在书架出现两份
+      const all = await db.courses.where('source').equals(source).toArray()
       // createdAt 是存储层字段，不进 CourseMeta
       return all.map(({ createdAt: _createdAt, ...meta }) => withDefaults(meta))
     },
@@ -87,8 +88,8 @@ function makeDbStore(): CourseStore {
   }
 }
 
-export const importedStore: CourseStore = makeDbStore()
-export const generatedStore: CourseStore = makeDbStore()
+export const importedStore: CourseStore = makeDbStore('imported')
+export const generatedStore: CourseStore = makeDbStore('generated')
 
 /* ───────── 写入 / 删除 / 配额 ───────── */
 
@@ -138,6 +139,14 @@ export async function deleteCourse(id: string): Promise<void> {
     await db.courses.delete(id)
     await db.files.where('courseId').equals(id).delete()
   })
+  invalidateTree(id)
+}
+
+/** 重命名课件（仅本地来源；同步更新印章字） */
+export async function renameCourse(id: string, title: string): Promise<void> {
+  const name = title.trim()
+  if (!name) throw new Error('标题不能为空')
+  await db.courses.update(id, { title: name, seal: [...name][0] || '课' })
   invalidateTree(id)
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeEntries, fromZip, stripCommonRoot } from './import'
+import { normalizeEntries, fromZip, stripCommonRoot, titleFromFileName, guessCourseTitle } from './import'
 import { strToU8, zipSync } from 'fflate'
 import type { RawEntry } from './import'
 
@@ -76,5 +76,30 @@ describe('stripCommonRoot', () => {
     // 根不唯一：保留
     const mixed = [raw('a/b.md'), raw('c/d.md')]
     expect(stripCommonRoot(mixed).map((e) => e.path)).toEqual(['a/b.md', 'c/d.md'])
+  })
+})
+
+describe('titleFromFileName', () => {
+  it('取末段、去扩展名、去数字前缀、分隔符转空格', () => {
+    expect(titleFromFileName('01_linux_内核笔记.zip')).toBe('linux 内核笔记')
+    expect(titleFromFileName('rust-book.tar.gz')).toBe('rust book')
+    expect(titleFromFileName('notes/toc.md')).toBe('toc')
+    expect(titleFromFileName('第03讲-进程调度.pdf')).toBe('第03讲 进程调度')
+    expect(titleFromFileName('')).toBe('')
+  })
+})
+
+describe('guessCourseTitle', () => {
+  it('共享无扩展名根目录 → 用目录名', () => {
+    expect(guessCourseTitle([raw('docker入门/README.md'), raw('docker入门/01_a.md')])).toBe('docker入门')
+  })
+  it('无共享根 → 用首个文件名', () => {
+    expect(guessCourseTitle([raw('01_内核.md'), raw('02_调度.md')])).toBe('内核')
+  })
+  it('垃圾/越白名单条目不参与推断', () => {
+    expect(guessCourseTitle([raw('.git/config'), raw('.DS_Store'), raw('真课件.md')])).toBe('真课件')
+  })
+  it('空条目 → 空标题', () => {
+    expect(guessCourseTitle([])).toBe('')
   })
 })

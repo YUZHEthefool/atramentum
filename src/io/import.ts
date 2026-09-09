@@ -149,6 +149,29 @@ export function normalizeEntries(entries: RawEntry[]): { path: string; text: str
   return cleaned.map((e) => ({ path: e.path, text: dec.decode(e.data) }))
 }
 
+/* ───────── 标题推断 ───────── */
+
+/** 文件名 → 课件标题：取末段、去扩展名（含 .tar.gz）、去数字前缀、分隔符转空格 */
+export function titleFromFileName(name: string): string {
+  const base = name.replace(/\\/g, '/').split('/').pop() ?? ''
+  return base
+    .replace(/\.tar\.gz$|\.tgz$/i, '')
+    .replace(/\.[^.]{1,12}$/, '')
+    .replace(/^\d+[\s._-]*/, '')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+}
+
+/** 目录/多文件导入推断标题：全部共享无扩展名根目录 → 用目录名；否则用首个文件名 */
+export function guessCourseTitle(entries: RawEntry[]): string {
+  const cleaned = entries.filter((e) => e.path && !isJunk(e.path) && allowedExt(e.path))
+  const root = cleaned[0]?.path.split('/')[0] ?? ''
+  if (root && !root.includes('.') && cleaned.every((e) => e.path.startsWith(`${root}/`))) {
+    return root.replace(/^\d+[\s._-]*/, '').replace(/[_-]+/g, ' ').trim()
+  }
+  return titleFromFileName(cleaned[0]?.path ?? '')
+}
+
 /* ───────── 入库 ───────── */
 
 export interface IngestResult {
@@ -210,9 +233,10 @@ function bookIndexMd(title: string, rows: { title: string; href: string }[]): st
 
 const pad2 = (n: number): string => String(n).padStart(2, '0')
 
-/** EPUB → 章节化书籍入库 */
-export async function ingestBookFromEpub(file: File, category: string): Promise<IngestResult> {
+/** EPUB → 章节化书籍入库；titleOverride 覆盖元数据书名（目录仍用元数据书名） */
+export async function ingestBookFromEpub(file: File, category: string, titleOverride?: string): Promise<IngestResult> {
   const { title, chapters } = await epubToChapters(file)
+  const display = (titleOverride ?? '').trim() || title
   const files = [
     {
       path: 'INDEX.md',
@@ -222,17 +246,20 @@ export async function ingestBookFromEpub(file: File, category: string): Promise<
   ]
   return ingestCourse(files, {
     source: 'imported',
-    title,
+    title: display,
     desc: `EPUB · ${chapters.length} 章`,
     category,
     format: 'epub',
   })
 }
 
-/** PDF → 逐页文本书籍入库 */
-export async function ingestBookFromPdf(file: File, category: string): Promise<IngestResult> {
+/** PDF → 逐页文本书籍入库；titleOverride 覆盖文件名推断 */
+export async function ingestBookFromPdf(file: File, category: string, titleOverride?: string): Promise<IngestResult> {
   const { pages } = await pdfToPages(file)
-  const title = file.name.replace(/\.pdf$/i, '') || '未命名 PDF'
+  const title =
+    (titleOverride ?? '').trim() ||
+    titleFromFileName(file.name) ||
+    '未命名 PDF'
   const files = [
     {
       path: 'INDEX.md',
