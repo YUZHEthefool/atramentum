@@ -2,7 +2,7 @@
  * 风格 skill 提炼：把现有课件（目录 + 样例节）交给 AI 总结成可复用的「写作风格规范」，
  * 保存为 skill 后在 AI 著书时注入生成 prompt。
  */
-import { chat } from '../ai/providers'
+import { chatStream } from '../ai/providers'
 import type { AIProviderConfig } from '../types/ai'
 
 const DISTILL_SYSTEM =
@@ -30,7 +30,7 @@ export async function distillSkill(
     .filter(Boolean)
     .join('\n\n')
 
-  const raw = await chat(config, {
+  const raw = await chatStream(config, {
     messages: [
       { role: 'system', content: DISTILL_SYSTEM },
       { role: 'user', content: user },
@@ -38,6 +38,7 @@ export async function distillSkill(
     temperature: 0.3,
     maxTokens: 4096,
     signal,
+    onDelta: () => {},
   })
   return stripFence(raw)
 }

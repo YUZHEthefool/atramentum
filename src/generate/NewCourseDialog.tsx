@@ -228,6 +228,7 @@ export function NewCourseDialog({
     setRevising(true)
     setReviseErr('')
     setReviseNote('')
+    setLive('') // 流式展示修改过程的原始输出
     const ac = new AbortController()
     abortRef.current = ac
     try {
@@ -240,6 +241,7 @@ export function NewCourseDialog({
           requirements: requirements || reqRef.current,
         },
         ac.signal,
+        (chunk) => setLive((prev) => (prev + chunk).slice(-400)),
       )
       // 标题未变的课时沿用其 file/skip（续写模式：已生成的不因改规划而重写）
       const used = new Set<number>()
@@ -260,6 +262,7 @@ export function NewCourseDialog({
     } finally {
       abortRef.current = null
       setRevising(false)
+      setLive('')
     }
   }
 
@@ -279,6 +282,7 @@ export function NewCourseDialog({
     setPlanErr('')
     setPhase('plan')
     setLessons([])
+    setLive('') // 流式展示规划生成的原始输出
     const ref = courses.find((c) => c.id === refId)
     try {
       refMatRef.current = ref ? await loadReference(ref) : { outline: '', sample: '' }
@@ -292,6 +296,7 @@ export function NewCourseDialog({
           referenceOutline: refMatRef.current.outline,
           sampleSection: skill?.sample || refMatRef.current.sample,
           styleGuide: skill?.styleGuide,
+          onDelta: (chunk) => setLive((prev) => (prev + chunk).slice(-400)),
         },
         ac.signal,
       )
@@ -301,6 +306,7 @@ export function NewCourseDialog({
       setPlanErr((e as Error).message)
     } finally {
       abortRef.current = null
+      setLive('')
     }
   }
 
@@ -707,7 +713,14 @@ export function NewCourseDialog({
             </div>
           )}
           {lessons.length === 0 ? (
-            <p className="py-8 text-center text-sm text-ink-faint">课时规划构思中……</p>
+            <div className="py-8">
+              <p className="text-center text-sm text-ink-faint">课时规划构思中……</p>
+              {live && (
+                <pre className="mx-auto mt-4 max-h-40 max-w-xl overflow-y-auto whitespace-pre-wrap break-all border border-ink/15 bg-paper-deep/40 p-3 text-xs leading-5 text-ink-faint">
+                  {live}
+                </pre>
+              )}
+            </div>
           ) : (
             <>
               <p className="mb-3 text-xs text-ink-faint">
@@ -789,6 +802,11 @@ export function NewCourseDialog({
                   )}
                 </div>
                 {reviseErr && <p className="mt-2 text-xs leading-5 text-cinnabar-deep">{reviseErr}</p>}
+                {revising && live && (
+                  <pre className="mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap break-all border border-ink/15 bg-paper-deep/40 p-2 text-xs leading-5 text-ink-faint">
+                    {live}
+                  </pre>
+                )}
               </div>
             </>
           )}

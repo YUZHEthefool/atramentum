@@ -4,7 +4,7 @@
  * 2. genLesson   —— 逐课时生成正文（流式）
  * 3. buildIndexMd —— 目录由代码拼接（保证目录表可被 structure.ts 解析）
  */
-import { chat, chatStream, extractJSON } from '../ai/providers'
+import { chatJSONStream, chatStream, extractJSON } from '../ai/providers'
 import type { AIProviderConfig } from '../types/ai'
 
 export interface PlanLesson {
@@ -22,6 +22,8 @@ export interface PlanParams {
   sampleSection: string
   /** 风格 skill 的规范（可为空；优先于样例） */
   styleGuide?: string
+  /** 规划生成过程的流式增量上屏（可为空） */
+  onDelta?: (chunk: string) => void
 }
 
 /* ───────── 课时规划 ───────── */
@@ -45,15 +47,15 @@ export async function genPlan(
     .filter(Boolean)
     .join('\n\n')
 
-  const raw = await chat(config, {
+  const raw = await chatJSONStream(config, {
     messages: [
       { role: 'system', content: PLAN_SYSTEM },
       { role: 'user', content: user },
     ],
-    json: true,
     temperature: 0.5,
     maxTokens: 4096,
     signal,
+    onDelta: params.onDelta ?? (() => {}),
   })
   return parsePlan(raw)
 }
@@ -115,6 +117,7 @@ export async function revisePlan(
     requirements?: string
   },
   signal?: AbortSignal,
+  onDelta?: (chunk: string) => void,
 ): Promise<RevisedPlan> {
   const user = [
     `【任务】课程「${params.topic}」的课时规划已拟好，用户提出了修改反馈，请输出修改后的完整规划。`,
@@ -127,15 +130,15 @@ export async function revisePlan(
     .filter(Boolean)
     .join('\n\n')
 
-  const raw = await chat(config, {
+  const raw = await chatJSONStream(config, {
     messages: [
       { role: 'system', content: PLAN_SYSTEM },
       { role: 'user', content: user },
     ],
-    json: true,
     temperature: 0.4,
     maxTokens: 4096,
     signal,
+    onDelta: onDelta ?? (() => {}),
   })
 
   // note 与 lessons 分开取：lessons 走 parsePlan 的容错（含裸数组兜底），note 缺席无碍

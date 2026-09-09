@@ -5,8 +5,10 @@
  * - anthropic: Claude，POST /messages（浏览器直连需 anthropic-dangerous-direct-browser-access 头）
  *
  * 统一接口：
- * - chat()       一次性调用（可强制 JSON 输出，供大纲生成等结构化场景）
+ * - chat()       一次性调用（短请求，如连通性测试）
  * - chatStream() SSE 流式调用（划词问答、逐节生成），onDelta 逐段回调
+ * - chatJSONStream() 流式 JSON 调用（课时规划等结构化场景；长请求保持字节流动，
+ *   避免非流式长连接被代理掐断的 Failed to fetch）
  * - listModels() 拉取可用模型列表
  * - extractJSON / describeAIError / isAbortError 工具
  */
@@ -258,6 +260,13 @@ export async function chatStream(config: AIProviderConfig, opts: StreamOptions):
   return chatStreamOpenAICompatible(config, opts)
 }
 
+/** 流式 JSON 调用：强制 JSON 输出（OpenAI response_format / Anthropic tool_choice），
+ *  但以 SSE 流式承载——长请求保持字节流动，不被中间层掐断，onDelta 可实时上屏 */
+export async function chatJSONStream(config: AIProviderConfig, opts: StreamOptions): Promise<string> {
+  if (config.kind === 'anthropic') return chatJSONStreamAnthropic(config, opts)
+  return chatJSONStreamOpenAICompatible(config, opts)
+}
+
 /* ───────── OpenAI 兼容 ───────── */
 
 async function postOpenAI(config: AIProviderConfig, body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
@@ -320,6 +329,44 @@ async function chatStreamOpenAICompatible(config: AIProviderConfig, opts: Stream
       // 心跳/注释等非 JSON 载荷，静默跳过
     }
   })
+  return full
+}
+
+async function chatJSONStreamOpenAICompatible(config: AIProviderConfig, opts: StreamOptions): Promise<string> {
+  const buildBody = (json: boolean): Record<string, unknown> => {
+    const b: Record<string, unknown> = {
+      model: config.model,
+      messages: opts.messages.map((m) => ({ role: m.role, content: m.content })),
+      temperature: opts.temperature ?? 0.4,
+      stream: true,
+    }
+    if (json) b.response_format = { type: 'json_object' }
+    return b
+  }
+  // 部分端点/模型不支持 response_format（对 json_object 报 400）：去掉后重试一次，
+  // system prompt 已强制"只输出 JSON"，由 extractJSON 容错解析
+  let res = await postOpenAI(config, buildBody(true), opts.signal)
+  if (!res.ok && res.status === 400) {
+    await res.body?.cancel().catch(() => {})
+    res = await postOpenAI(config, buildBody(false), opts.signal)
+  }
+  if (!res.ok) throw await toAIError(res, 'API')
+
+  let full = ''
+  await consumeSSE(res, (data) => {
+    if (data === '[DONE]') return
+    try {
+      const json = JSON.parse(data)
+      const delta = json?.choices?.[0]?.delta?.content ?? json?.choices?.[0]?.message?.content ?? ''
+      if (typeof delta === 'string' && delta) {
+        full += delta
+        opts.onDelta(delta)
+      }
+    } catch {
+      // 心跳/注释等非 JSON 载荷，静默跳过
+    }
+  })
+  if (!full) throw new AIError('空响应：模型未返回文本')
   return full
 }
 
@@ -408,6 +455,53 @@ async function chatStreamAnthropic(config: AIProviderConfig, opts: StreamOptions
       // 非 JSON 行，跳过
     }
   })
+  return full
+}
+
+/** 流式 + 强制 JSON：tool_use 承载（Claude 对纯提示的 JSON 服从性不稳定），
+ *  input_json_delta 逐段拼出 JSON 文本；流式保持连接活性 */
+async function chatJSONStreamAnthropic(config: AIProviderConfig, opts: StreamOptions): Promise<string> {
+  const system = opts.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n')
+  const messages = opts.messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content }))
+
+  const body: Record<string, unknown> = {
+    model: config.model,
+    max_tokens: opts.maxTokens ?? 8192,
+    temperature: opts.temperature ?? 0.4,
+    system,
+    messages,
+    stream: true,
+    tools: [{
+      name: 'emit_json',
+      description: 'Emit the structured JSON result.',
+      input_schema: { type: 'object', additionalProperties: true },
+    }],
+    tool_choice: { type: 'tool', name: 'emit_json' },
+  }
+  const res = await fetch(`${trimSlash(config.baseURL)}/messages`, {
+    method: 'POST',
+    headers: anthropicHeaders(config),
+    body: JSON.stringify(body),
+    signal: opts.signal,
+  })
+  if (!res.ok) throw await toAIError(res, 'Anthropic')
+
+  let full = ''
+  await consumeSSE(res, (data) => {
+    try {
+      const json = JSON.parse(data)
+      // JSON 由 tool_use 块的 input_json_delta 逐段承载；text 前导若有也收下（extractJSON 容错）
+      if (json?.type === 'content_block_delta' && json?.delta?.type === 'input_json_delta' && typeof json.delta.partial_json === 'string') {
+        full += json.delta.partial_json
+        opts.onDelta(json.delta.partial_json)
+      } else if (json?.type === 'content_block_delta' && json?.delta?.type === 'text_delta' && typeof json.delta.text === 'string') {
+        opts.onDelta(json.delta.text)
+      }
+    } catch {
+      // 非 JSON 行，跳过
+    }
+  })
+  if (!full) throw new AIError('Anthropic 空响应')
   return full
 }
 
