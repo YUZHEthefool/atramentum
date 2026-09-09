@@ -11,9 +11,10 @@ import { FloatingToolbar } from '../ask/FloatingToolbar'
 import { AskPanel } from '../ask/AskPanel'
 import type { AskSeed } from '../ask/AskPanel'
 import { SettingsDialog } from './SettingsDialog'
-import { NewCourseDialog } from '../generate/NewCourseDialog'
 import { exportCourseZip } from '../io/export'
 import { useCategoryStore } from '../store/categoryStore'
+import { onCourseCreated, useGenerateStore } from '../generate/generateStore'
+import { GenerateBadge } from './GenerateBadge'
 
 type Phase = 'loading' | 'ready' | 'missing' | 'error'
 
@@ -114,10 +115,8 @@ export default function Reader() {
   const [askOpen, setAskOpen] = useState(false)
   const [askSeed, setAskSeed] = useState<AskSeed | null>(null)
   const [showSettings, setShowSettings] = useState(false)
-  // 续写 / 整书改写：md 课件可沿规划补齐或整体重写；continueMeta 在打开时定格，避免刷新期间对话框被卸载
-  const [showContinue, setShowContinue] = useState(false)
-  const [rewriteOpen, setRewriteOpen] = useState(false)
-  const [continueMeta, setContinueMeta] = useState<CourseMeta | null>(null)
+  // 续写 / 整书改写：走全局生成对话框（最小化后生成不中断）
+  const openGenerate = useGenerateStore((s) => s.openGenerate)
   const [forking, setForking] = useState(false)
   const [reloadNonce, setReloadNonce] = useState(0)
   const [exporting, setExporting] = useState(false)
@@ -155,18 +154,17 @@ export default function Reader() {
         const forked = await forkCourseForEdit(meta)
         const cat = useCategoryStore.getState().assign[meta.id]
         if (cat) useCategoryStore.getState().assignTo(forked.id, cat)
-        setContinueMeta(forked)
+        openGenerate({ continueCourse: forked, rewrite: true })
       } else {
-        setContinueMeta(meta)
+        openGenerate({ continueCourse: meta, rewrite: true })
       }
-      setRewriteOpen(true)
     } catch (e) {
       setExportMsg(`整书改写初始化失败：${(e as Error).message}`)
       setTimeout(() => setExportMsg(''), 4000)
     } finally {
       setForking(false)
     }
-  }, [meta, forking])
+  }, [meta, forking, openGenerate])
 
   const getProseRoot = useCallback(() => {
     // mountMarkdown 挂载的 .prose 根是 mountRef 的首子元素
@@ -243,6 +241,9 @@ export default function Reader() {
     }
   }, [courseId, reloadNonce])
 
+  // AI 著书写成（含续写/改写写回）→ 若正是当前书，重载目录树与正文
+  useEffect(() => onCourseCreated((m) => m.id === courseId && setReloadNonce((n) => n + 1)), [courseId])
+
   const flat = useMemo(() => (tree ? flattenLessons(tree.lessons) : []), [tree])
 
   // 无 path 参数或 path 不在树内 → 定位第一节
@@ -262,7 +263,7 @@ export default function Reader() {
       .readFile(courseId, currentPath)
       .then((text) => {
         if (!alive) return
-        if (text === null) setContentErr('正文加载失败：文件不存在或读取被拒')
+        if (text === null) setContentErr('该课时尚未写出……AI 正在后台撰写，完成后自动显示')
         else setContent(text)
       })
       .catch((e) => alive && setContentErr((e as Error).message))
@@ -270,6 +271,33 @@ export default function Reader() {
       alive = false
     }
   }, [phase, courseId, currentPath, meta])
+
+  // AI 著书实时入库：正在后台生成的书，正文可能还没写完——失败时自动轮询重试，
+  // 写完的那一刻自动出现（「文到即读」），无需手动刷新
+  const [contentRetry, setContentRetry] = useState(0)
+  useEffect(() => {
+    if (!contentErr) return
+    const timer = setTimeout(() => setContentRetry((n) => n + 1), 3000)
+    return () => clearTimeout(timer)
+  }, [contentErr, contentRetry])
+  useEffect(() => {
+    if (contentRetry === 0) return
+    if (phase !== 'ready' || !currentPath || !meta) return
+    let alive = true
+    storeFor(meta.source)
+      .readFile(courseId, currentPath)
+      .then((text) => {
+        if (!alive) return
+        if (text !== null) {
+          setContent(text)
+          setContentErr('')
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [contentRetry, phase, courseId, currentPath, meta])
 
   // 渲染 markdown/书籍内容 → DOM（md 含链接改写、heading id）
   useEffect(() => {
@@ -419,8 +447,7 @@ export default function Reader() {
                 className="border border-ink/15 px-2.5 py-1 text-ink-soft transition hover:border-cinnabar/50 hover:text-cinnabar-deep"
                 title="沿课时规划继续生成缺失的课时"
                 onClick={() => {
-                  setContinueMeta(meta)
-                  setShowContinue(true)
+                  openGenerate({ continueCourse: meta })
                 }}
               >
                 续写
@@ -513,25 +540,7 @@ export default function Reader() {
 
       {probe && <FloatingToolbar x={probe.x} y={probe.y} onAsk={handleAsk} />}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
-      {showContinue && continueMeta && (
-        <NewCourseDialog
-          continueCourse={continueMeta}
-          onClose={() => setShowContinue(false)}
-          onCreated={() => setReloadNonce((n) => n + 1)}
-        />
-      )}
-      {rewriteOpen && continueMeta && (
-        <NewCourseDialog
-          continueCourse={continueMeta}
-          rewrite
-          onClose={() => setRewriteOpen(false)}
-          onCreated={(m) => {
-            // 内置课件改写发生在 fork 副本上：完成后跳到副本；其余来源刷新当前书
-            if (m.id !== courseId) navigate(`/c/${m.id}`)
-            else setReloadNonce((n) => n + 1)
-          }}
-        />
-      )}
+      <GenerateBadge />
     </div>
   )
 }

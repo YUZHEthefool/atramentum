@@ -4,9 +4,14 @@
 // 整书改写（rewrite + continueCourse）：恢复规划后所有课时按「改写要求」重写并覆盖写回。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listAllCourses, storeFor } from '../course'
-import { loadCoursePlan, saveCourse, saveCoursePlan } from '../course/dbStore'
+import {
+  createCourseRecord,
+  deleteCourse,
+  loadCoursePlan,
+  saveCourse,
+  updateCourseFile,
+} from '../course/dbStore'
 import type { StoredPlan } from '../course/dbStore'
-import { ingestCourse } from '../io/import'
 import type { CourseMeta } from '../types/course'
 import { isAbortError } from '../ai/providers'
 import { useSettingsStore } from '../store/settingsStore'
@@ -15,6 +20,7 @@ import { distillSkill } from './skill'
 import { DEFAULT_SKILL } from './defaultSkill'
 import { buildIndexMd, genLesson, genPlan, lessonFile, parseIndexEntries, planText, revisePlan } from './pipeline'
 import type { PlanLesson } from './pipeline'
+import { emitCourseCreated, useGenerateStore } from './generateStore'
 import { Overlay } from '../components/common/Overlay'
 
 type Phase = 'form' | 'plan' | 'generating' | 'done'
@@ -46,19 +52,11 @@ async function loadReference(meta: CourseMeta): Promise<{ outline: string; sampl
   }
 }
 
-export function NewCourseDialog({
-  onClose,
-  onCreated,
-  continueCourse,
-  rewrite,
-}: {
-  onClose: () => void
-  onCreated?: (meta: CourseMeta) => void
-  /** 续写模式：传入已入库的课件，恢复规划并补齐缺失课时 */
-  continueCourse?: CourseMeta | null
-  /** 整书改写：配合 continueCourse，恢复规划后所有课时按「改写要求」重写并覆盖写回 */
-  rewrite?: boolean
-}) {
+export function NewCourseDialog() {
+  // 全局承载：生成是长任务，对话框挂在路由之外；最小化不卸载、不中断
+  const { visible, minimize, close } = useGenerateStore()
+  const continueCourse = useGenerateStore((s) => s.continueCourse)
+  const rewrite = useGenerateStore((s) => s.rewrite)
   const ai = useSettingsStore((s) => s.ai)
   const skills = useSkillStore((s) => s.skills)
   const addSkill = useSkillStore((s) => s.add)
@@ -102,12 +100,22 @@ export function NewCourseDialog({
 
   // 生成期状态
   const [fileStatus, setFileStatus] = useState<Record<string, FileStatus>>({})
-  const [activity, setActivity] = useState('')
+  // 「正在生成」从进行中的课时派生（并发生成时可能多个）
+  const activity = useMemo(
+    () =>
+      lessonsRef.current
+        .filter((_, i) => fileStatus[`l${i}`] === 'running')
+        .map((l) => l.title)
+        .join(' · '),
+    [fileStatus],
+  )
   const [live, setLive] = useState('')
   const [genErr, setGenErr] = useState('')
   const [doneInfo, setDoneInfo] = useState('')
   // 当前课时的已用秒数（无输出时用户也能确认请求还活着）
   const [elapsed, setElapsed] = useState(0)
+  // 并发路数（1~4；1 = 纯串行）。越高越快，但可能撞供应商限流
+  const [parallel, setParallel] = useState(2)
   const abortRef = useRef<AbortController | null>(null)
   const filesRef = useRef<Map<string, string>>(new Map())
   const lessonsRef = useRef<PlanItem[]>([])
@@ -312,20 +320,25 @@ export function NewCourseDialog({
     }
   }
 
-  /** 生成单个课时正文（start 与 retryFailed 共用）；瞬时失败自动重试一次，避免长书中途断掉 */
+  /** 生成单个课时正文（start 与 retryFailed 共用）。断流自愈：连接中途断掉时，
+   *  把已收到的部分作为续写底稿接着写（最多 3 次尝试），而不是从头重写。
+   *  persist 非空时，写完立即入库——阅读器可以实时看到已完成的课时。 */
   const genOneLesson = useCallback(
-    async (li: number, ac: AbortController): Promise<void> => {
+    async (li: number, ac: AbortController, persist?: (text: string) => Promise<void>): Promise<void> => {
       const all = lessonsRef.current
       const lesson = all[li]
       if (!lesson) return
       const key = `l${li}`
-      setActivity(lesson.title)
+      setSt(key, 'running')
       setElapsed(0)
       const startedAt = Date.now()
       const tick = setInterval(() => setElapsed(Math.round((Date.now() - startedAt) / 1000)), 1000)
       try {
+        let partial = '' // 本轮流式已收到的正文（中断时成为续写底稿）
+        let reasoningTail = '' // 思考流尾巴（续写时上屏，避免看起来卡死）
+        const showTail = () => setLive((partial + reasoningTail).slice(-400))
         for (let attempt = 1; ; attempt++) {
-          setLive('')
+          setLive(partial || '')
           setSt(key, 'running')
           try {
             const text = await genLesson(
@@ -346,22 +359,31 @@ export function NewCourseDialog({
                 // 整书改写：以现有正文为底稿按改写要求重写
                 rewriteOf: rewriteModeRef.current ? (filesRef.current.get(lessonFile(li)) ?? '') : undefined,
                 rewriteNote: rewriteModeRef.current ? rewriteNoteRef.current : undefined,
+                // 断点续写：把已收到的部分交回去接着写
+                continueOf: partial || undefined,
               },
-              (chunk) => setLive((prev) => (prev + chunk).slice(-400)),
+              (chunk) => {
+                partial += chunk
+                showTail()
+              },
               ac.signal,
               // 思考过程（推理模型）：也上屏，用户能看到模型确实在动
-              (chunk) => setLive((prev) => (prev + chunk).slice(-400)),
+              (chunk) => {
+                reasoningTail = (reasoningTail + chunk).slice(-400)
+                showTail()
+              },
             )
             filesRef.current.set(lessonFile(li), text)
             setSt(key, 'done')
+            if (persist) await persist(text) // 实时入库：阅读器立刻可读该课时
             return
           } catch (e) {
             if (isAbortError(e)) throw e
-            if (attempt >= 2) {
+            if (attempt >= 3) {
               setSt(key, 'error')
               return
             }
-            await new Promise((r) => setTimeout(r, 1500)) // 退避后重试
+            await new Promise((r) => setTimeout(r, 1500)) // 退避后从断点续写
             if (ac.signal.aborted) throw new DOMException('已停止', 'AbortError')
           }
         }
@@ -379,54 +401,40 @@ export function NewCourseDialog({
     lessons: lessonsRef.current.map(({ title, points }) => ({ title, points })),
   })
 
-  /** 生成结束（完成/失败/取消）统一收尾：有产出就入库，无产出回规划页 */
+  /** 生成结束（完成/失败/取消）统一收尾：有产出就入库，无产出回规划页。
+   *  生成期课程记录已实时建好（createdRef 非空），这里只统一 meta 与规划骨架。 */
   const finalize = useCallback(
     async (fatalErr: string) => {
       const files = [...filesRef.current].map(([path, text]) => ({ path, text }))
-      if (files.length <= 1) {
+      const plan = planToStore()
+      const created = createdRef.current
+      if (!created || files.length <= 1) {
+        // 一无所出：清掉实时入库留的空壳记录（只有 INDEX），不留垃圾书
+        if (created && files.length <= 1) {
+          await deleteCourse(created.id)
+          createdRef.current = null
+        }
         setGenErr(fatalErr || '没有生成出可用内容，请检查模型与网络后重试。')
         setPhase('plan')
         return
       }
-      const plan = planToStore()
-      const created = createdRef.current
-      if (created) {
-        // 续写 / 改写 / 重试场景：覆盖写回同一门课
-        await saveCourse(
-          {
-            ...created,
-            fileCount: files.length,
-            desc: created.source === 'generated' ? `AI 生成 · ${lessonsRef.current.length} 课时` : created.desc,
-          },
-          files,
-          Date.now(),
-          plan,
-        )
-        setDoneInfo(`${created.title} · ${files.length} 个文件`)
-        setPhase('done')
-        onCreated?.(created)
-        return
+      // 覆盖写回（新书的实时入库记录 / 续写改写的原书）：统一 meta、全量文件与规划骨架
+      const meta: CourseMeta = {
+        ...created,
+        fileCount: files.length,
+        files: files.map((f) => f.path),
+        desc: created.source === 'generated' ? `AI 生成 · ${lessonsRef.current.length} 课时` : created.desc,
       }
-      try {
-        const { meta } = await ingestCourse(files, {
-          source: 'generated',
-          title: topicRef.current,
-          desc: `AI 生成 · ${lessonsRef.current.length} 课时`,
-        })
-        await saveCoursePlan(meta.id, plan)
-        createdRef.current = meta
-        setDoneInfo(`${meta.title} · ${files.length} 个文件`)
-        setPhase('done')
-        onCreated?.(meta)
-      } catch (e) {
-        setGenErr(`入库失败：${(e as Error).message}`)
-        setPhase('plan')
-      }
+      await saveCourse(meta, files, Date.now(), plan)
+      createdRef.current = meta
+      emitCourseCreated(meta)
+      setDoneInfo(`${meta.title} · ${files.length} 个文件`)
+      setPhase('done')
     },
-    [onCreated],
+    [],
   )
 
-  /* ── 逐课时生成 ── */
+  /* ── 逐课时生成（并发池：1~4 路同时写，写完即入库可读） ── */
   const startGeneration = useCallback(async () => {
     const all = lessonsRef.current
     const ac = new AbortController()
@@ -451,20 +459,49 @@ export function NewCourseDialog({
       filesRef.current = new Map()
     }
     filesRef.current.set('INDEX.md', buildIndexMd(topicRef.current, all))
-    let fatalErr = ''
-    try {
-      for (let li = 0; li < all.length; li++) {
-        const item = all[li]
-        // 续写：归位后该位置已有正文（跳过项）则沿用，不再请求模型
-        if (item.skip && filesRef.current.has(lessonFile(li))) continue
-        await genOneLesson(li, ac)
+
+    // 实时入库：开写前立课程记录（新书面目 + INDEX 目录），之后每课时写完即补文件——
+    // 生成中途就能去阅读器看已完成的课时。continueCourse 场景记录已存在，无需重建。
+    //（用 createCourseRecord 立记录拿不到返回 meta，直接本地构造并写入；id 同款规则）
+    if (!createdRef.current && filesRef.current.size > 1) {
+      const title = topicRef.current.trim() || '未命名课件'
+      const meta: CourseMeta = {
+        id: `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        title,
+        seal: [...title][0] || '课',
+        desc: `AI 生成 · ${all.length} 课时`,
+        kind: 'dir',
+        fileCount: filesRef.current.size,
+        files: [...filesRef.current.keys()],
+        category: '学习',
+        format: 'md',
+        source: 'generated',
       }
-    } catch (e) {
-      if (!isAbortError(e)) fatalErr = (e as Error).message
+      await createCourseRecord(meta)
+      createdRef.current = meta
+      // INDEX 目录先落库，阅读器打开时目录树才有结构（课时随后逐个补文件）
+      await updateCourseFile(meta.id, 'INDEX.md', filesRef.current.get('INDEX.md') ?? '')
     }
+    const courseId = createdRef.current?.id
+
+    // 待写队列（按规划顺序出队；并发 worker 各自取活）
+    const queue = all.map((_, i) => i).filter((i) => !(all[i].skip && filesRef.current.has(lessonFile(i))))
+    const workers = Array.from({ length: Math.max(1, Math.min(4, parallel, queue.length)) }, async () => {
+      for (;;) {
+        const li = queue.shift()
+        if (li === undefined || ac.signal.aborted) return
+        try {
+          await genOneLesson(li, ac, courseId ? (text) => updateCourseFile(courseId, lessonFile(li), text) : undefined)
+        } catch (e) {
+          if (isAbortError(e)) return
+          // 断流/入库失败不终止整池：genOneLesson 内部已标 error，继续取下一个课时
+        }
+      }
+    })
+    await Promise.all(workers)
     abortRef.current = null
-    await finalize(fatalErr)
-  }, [genOneLesson, finalize])
+    await finalize('')
+  }, [genOneLesson, finalize, parallel])
 
   /** 重写失败的课时（重生成后覆盖入库） */
   const retryFailed = useCallback(async () => {
@@ -477,18 +514,24 @@ export function NewCourseDialog({
     abortRef.current = ac
     setPhase('generating')
     setGenErr('')
-    let fatalErr = ''
-    try {
-      for (const li of failed) {
-        if (!lessonsRef.current[li]) continue
-        await genOneLesson(li, ac)
-      }
-    } catch (e) {
-      if (!isAbortError(e)) fatalErr = (e as Error).message
-    }
+    const courseId = createdRef.current?.id
+    const queue = [...failed]
+    await Promise.all(
+      Array.from({ length: Math.max(1, Math.min(4, parallel, queue.length)) }, async () => {
+        for (;;) {
+          const li = queue.shift()
+          if (li === undefined || ac.signal.aborted) return
+          try {
+            await genOneLesson(li, ac, courseId ? (text) => updateCourseFile(courseId, lessonFile(li), text) : undefined)
+          } catch (e) {
+            if (isAbortError(e)) return
+          }
+        }
+      }),
+    )
     abortRef.current = null
-    await finalize(fatalErr)
-  }, [fileStatus, genOneLesson, finalize])
+    await finalize('')
+  }, [fileStatus, genOneLesson, finalize, parallel])
 
   const cancel = () => {
     abortRef.current?.abort()
@@ -521,15 +564,38 @@ export function NewCourseDialog({
   const chipText = (st: FileStatus): string =>
     st === 'done' ? '✓' : st === 'running' ? '…' : st === 'error' ? '✕' : '○'
 
+  /** 新标签页打开阅读器看某课时（HashRouter 下拼 hash 路由） */
+  const openLesson = (li: number) => {
+    const id = createdRef.current?.id
+    if (!id) return
+    const base = import.meta.env.BASE_URL // './' 或 '/'
+    const prefix = base.endsWith('/') ? base : `${base}/`
+    window.open(`${prefix}#/c/${id}?path=${encodeURIComponent(lessonFile(li))}`, '_blank')
+  }
+
+  // 最小化：组件保持挂载（流式任务在跑），只是不渲染面板
+  if (!visible) return null
+
   return (
-    <Overlay onClose={phase === 'generating' ? () => undefined : onClose} closeOnOverlay={phase !== 'generating'}>
+    <Overlay onClose={phase === 'generating' ? minimize : close} closeOnOverlay={phase !== 'generating'}>
       <div className="flex items-center justify-between border-b border-ink/15 px-5 py-3">
         <h2 className="font-song text-base font-bold tracking-wide">AI 著书</h2>
-        {phase !== 'generating' && (
-          <button className="text-ink-faint transition hover:text-cinnabar" onClick={onClose} aria-label="关闭">
-            ✕
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {phase === 'generating' && (
+            <button
+              className="border border-ink/20 px-2 py-0.5 text-xs text-ink-faint transition hover:border-cinnabar/50 hover:text-cinnabar"
+              onClick={minimize}
+              title="收起对话框，生成在后台继续；可随时去书架/阅读器预览已写完的课时"
+            >
+              收起
+            </button>
+          )}
+          {phase !== 'generating' && (
+            <button className="text-ink-faint transition hover:text-cinnabar" onClick={close} aria-label="关闭">
+              ✕
+            </button>
+          )}
+        </div>
       </div>
 
       {/* ── 第一步：学习意向 ── */}
@@ -674,7 +740,7 @@ export function NewCourseDialog({
             <p className="border border-cinnabar/40 bg-cinnabar/5 px-3 py-2 text-xs leading-5 text-cinnabar-deep">{planErr}</p>
           )}
           <div className="flex items-center justify-end gap-3">
-            <button className="border border-ink/25 px-4 py-1.5 text-sm text-ink-soft transition hover:border-cinnabar/50" onClick={onClose}>
+            <button className="border border-ink/25 px-4 py-1.5 text-sm text-ink-soft transition hover:border-cinnabar/50" onClick={close}>
               取消
             </button>
             <button
@@ -822,9 +888,26 @@ export function NewCourseDialog({
             </>
           )}
           <div className="mt-3 flex items-center justify-between">
-            <button className="text-xs text-ink-faint transition hover:text-cinnabar disabled:opacity-40" onClick={addLesson} disabled={revising}>
-              ＋ 加一课时
-            </button>
+            <div className="flex items-center gap-3">
+              <button className="text-xs text-ink-faint transition hover:text-cinnabar disabled:opacity-40" onClick={addLesson} disabled={revising}>
+                ＋ 加一课时
+              </button>
+              <label className="flex items-center gap-1.5 text-xs text-ink-faint" title="同时生成几路课时：越高越快，但可能撞供应商限流（429）；1 = 纯串行">
+                并发
+                <select
+                  className="border border-ink/20 bg-paper px-1.5 py-0.5 text-xs text-ink outline-none focus:border-cinnabar"
+                  value={parallel}
+                  onChange={(e) => setParallel(Number(e.target.value))}
+                  disabled={revising}
+                >
+                  {[1, 2, 3, 4].map((n) => (
+                    <option key={n} value={n}>
+                      {n} 路
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <div className="flex items-center gap-3">
               <button
                 className="border border-ink/25 px-4 py-1.5 text-sm text-ink-soft transition hover:border-cinnabar/50 disabled:opacity-40"
@@ -853,9 +936,22 @@ export function NewCourseDialog({
       {/* ── 第三步：生成进度 ── */}
       {phase === 'generating' && (
         <div className="p-5">
-          <p className="text-sm text-ink-soft">
-            正在生成：<span className="font-semibold text-ink">{activity}</span>
-            <span className="ml-2 text-xs text-ink-faint">已用 {elapsed} 秒</span>
+          <div className="flex items-baseline justify-between gap-3">
+            <p className="min-w-0 truncate text-sm text-ink-soft">
+              正在生成：<span className="font-semibold text-ink">{activity}</span>
+            </p>
+            {createdRef.current && (
+              <button
+                className="shrink-0 border border-ink/20 px-2.5 py-1 text-xs text-ink-soft transition hover:border-cinnabar/50 hover:text-cinnabar-deep"
+                onClick={() => openLesson(0)}
+                title="新标签页打开阅读器；已写完的课时立即可读，未写的显示加载失败属正常"
+              >
+                开新标签页预览 ↗
+              </button>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-ink-faint">
+            {Math.max(1, Math.min(4, parallel))} 路并发生成中 · 本轮已用 {elapsed} 秒 · 课时写完即可在预览中阅读
           </p>
           {live && (
             <pre className="mt-3 max-h-32 overflow-y-auto whitespace-pre-wrap break-all border border-ink/15 bg-paper-deep/40 p-3 text-xs leading-5 text-ink-faint">
@@ -868,9 +964,17 @@ export function NewCourseDialog({
               return (
                 <div key={li} className="flex items-center gap-2 text-sm">
                   <span className={`w-4 shrink-0 text-center text-xs ${chipCls(st)}`}>{chipText(st)}</span>
-                  <span className={`min-w-0 truncate ${st === 'error' ? 'text-cinnabar' : 'text-ink-soft'}`}>
+                  <span className={`min-w-0 flex-1 truncate ${st === 'error' ? 'text-cinnabar' : 'text-ink-soft'}`}>
                     {li + 1}. {l.title}
                   </span>
+                  {st === 'done' && createdRef.current && (
+                    <button
+                      className="shrink-0 text-xs text-cinnabar-deep underline underline-offset-2 transition hover:text-cinnabar"
+                      onClick={() => openLesson(li)}
+                    >
+                      去看 ↗
+                    </button>
+                  )}
                 </div>
               )
             })}
@@ -905,12 +1009,20 @@ export function NewCourseDialog({
               >
                 重写失败课时
               </button>
-              <button className="bg-cinnabar px-5 py-1.5 text-sm text-paper transition hover:bg-cinnabar-deep" onClick={onClose}>
+              {createdRef.current && (
+                <button
+                  className="border border-ink/20 px-5 py-1.5 text-sm text-ink-soft transition hover:border-cinnabar/50 hover:text-cinnabar-deep"
+                  onClick={() => openLesson(0)}
+                >
+                  去阅读 ↗
+                </button>
+              )}
+              <button className="bg-cinnabar px-5 py-1.5 text-sm text-paper transition hover:bg-cinnabar-deep" onClick={close}>
                 {continueCourse ? '完成' : '回书架'}
               </button>
             </div>
           ) : (
-            <button className="mt-5 bg-cinnabar px-5 py-1.5 text-sm text-paper transition hover:bg-cinnabar-deep" onClick={onClose}>
+            <button className="mt-5 bg-cinnabar px-5 py-1.5 text-sm text-paper transition hover:bg-cinnabar-deep" onClick={close}>
               {continueCourse ? '完成' : '回书架'}
             </button>
           )}

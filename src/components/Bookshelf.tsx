@@ -8,7 +8,8 @@ import type { CourseMeta } from '../types/course'
 import { COURSE_DND_MIME, UNCATEGORIZED, groupCourses, useCategoryStore } from '../store/categoryStore'
 import { SettingsDialog } from './SettingsDialog'
 import { ImportDialog } from './ImportDialog'
-import { NewCourseDialog } from '../generate/NewCourseDialog'
+import { onCourseCreated, useGenerateStore } from '../generate/generateStore'
+import { GenerateBadge } from './GenerateBadge'
 
 const SOURCE_LABEL: Record<CourseMeta['source'], string> = {
   builtin: '内置',
@@ -190,7 +191,7 @@ export default function Bookshelf() {
   const [error, setError] = useState('')
   const [showSettings, setShowSettings] = useState(false)
   const [showImport, setShowImport] = useState(false)
-  const [showGenerate, setShowGenerate] = useState(false)
+  const openGenerate = useGenerateStore((s) => s.openGenerate)
 
   const order = useCategoryStore((s) => s.order)
   const assign = useCategoryStore((s) => s.assign)
@@ -211,6 +212,9 @@ export default function Bookshelf() {
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  // AI 著书写完（或续写写回）→ 书架实时出新书/更新，不等用户手动刷新
+  useEffect(() => onCourseCreated(() => refresh()), [refresh])
 
   const groups = useMemo(() => groupCourses(courses ?? [], assign, order), [courses, assign, order])
 
@@ -251,7 +255,7 @@ export default function Bookshelf() {
           <div className="flex items-center gap-4">
             <button
               className="border border-ink/20 px-3 py-1.5 text-xs tracking-widest text-ink-soft transition hover:border-cinnabar/50 hover:text-cinnabar-deep"
-              onClick={() => setShowGenerate(true)}
+              onClick={() => openGenerate()}
             >
               AI 著书
             </button>
@@ -373,7 +377,8 @@ export default function Bookshelf() {
 
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
       {showImport && <ImportDialog onClose={() => setShowImport(false)} onImported={refresh} />}
-      {showGenerate && <NewCourseDialog onClose={() => setShowGenerate(false)} onCreated={refresh} />}
+      {/* AI 著书对话框全局挂在 App；这里只触发打开 */}
+      <GenerateBadge />
     </main>
   )
 }
