@@ -100,15 +100,6 @@ export function NewCourseDialog() {
 
   // 生成期状态
   const [fileStatus, setFileStatus] = useState<Record<string, FileStatus>>({})
-  // 「正在生成」从进行中的课时派生（并发生成时可能多个）
-  const activity = useMemo(
-    () =>
-      lessonsRef.current
-        .filter((_, i) => fileStatus[`l${i}`] === 'running')
-        .map((l) => l.title)
-        .join(' · '),
-    [fileStatus],
-  )
   const [live, setLive] = useState('')
   const [genErr, setGenErr] = useState('')
   const [doneInfo, setDoneInfo] = useState('')
@@ -123,6 +114,16 @@ export function NewCourseDialog() {
   const topicRef = useRef('')
   const reqRef = useRef('')
   const createdRef = useRef<CourseMeta | null>(null)
+
+  // 「正在生成」从进行中的课时派生（并发生成时可能多个）；须在 lessonsRef 声明之后
+  const activity = useMemo(
+    () =>
+      lessonsRef.current
+        .filter((_, i) => fileStatus[`l${i}`] === 'running')
+        .map((l) => l.title)
+        .join(' · '),
+    [fileStatus],
+  )
 
   useEffect(() => {
     let alive = true
