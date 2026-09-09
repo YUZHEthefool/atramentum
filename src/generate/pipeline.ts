@@ -185,6 +185,7 @@ export async function genLesson(
   params: LessonParams,
   onDelta: (chunk: string) => void,
   signal?: AbortSignal,
+  onReasoningDelta?: (chunk: string) => void,
 ): Promise<string> {
   const user = [
     `【课件主题】${params.topic}`,
@@ -222,6 +223,7 @@ export async function genLesson(
       maxTokens: 8192,
       signal,
       onDelta,
+      onReasoningDelta,
     },
   )
   return stripFenceWrap(raw)

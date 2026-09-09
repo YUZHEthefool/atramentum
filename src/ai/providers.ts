@@ -31,6 +31,8 @@ export interface ChatOptions {
 
 export interface StreamOptions extends ChatOptions {
   onDelta: (chunk: string) => void
+  /** 推理模型的思考过程增量（DeepSeek reasoning_content / Claude thinking_delta）；可为空 */
+  onReasoningDelta?: (chunk: string) => void
 }
 
 /* ───────── Agent：带工具调用的流式对话 ───────── */
@@ -269,8 +271,30 @@ export async function chatJSONStream(config: AIProviderConfig, opts: StreamOptio
 
 /* ───────── OpenAI 兼容 ───────── */
 
+/** 连接阶段超时：发出请求后这么久仍未收到响应头（含代理 5xx 页面）才判失败。
+ *  响应头到达后立刻解除，之后由 SSE 空闲看门狗接管——不限制生成总时长。 */
+const CONNECT_TIMEOUT_MS = 60_000
+
+/** fetch + 连接阶段超时（外部 signal 原样转发；超时以 AIError 中止） */
+async function fetchAI(url: string, init: RequestInit): Promise<Response> {
+  const external = init.signal
+  const ctrl = new AbortController()
+  const onAbort = () => ctrl.abort(external?.reason)
+  if (external) {
+    if (external.aborted) ctrl.abort(external.reason)
+    else external.addEventListener('abort', onAbort)
+  }
+  const timer = setTimeout(() => ctrl.abort(new AIError(`连接超时（${Math.round(CONNECT_TIMEOUT_MS / 1000)} 秒未收到响应头）：端点不可达或代理拦截，请检查网络/地址`)), CONNECT_TIMEOUT_MS)
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal })
+  } finally {
+    clearTimeout(timer)
+    external?.removeEventListener('abort', onAbort)
+  }
+}
+
 async function postOpenAI(config: AIProviderConfig, body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
-  return fetch(`${trimSlash(config.baseURL)}/chat/completions`, {
+  return fetchAI(`${trimSlash(config.baseURL)}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
     body: JSON.stringify(body),
@@ -320,15 +344,20 @@ async function chatStreamOpenAICompatible(config: AIProviderConfig, opts: Stream
     try {
       const json = JSON.parse(data)
       // 兼容 delta.content 与 message.content（部分网关流式下仍回 message）
-      const delta = json?.choices?.[0]?.delta?.content ?? json?.choices?.[0]?.message?.content ?? ''
+      const choice = json?.choices?.[0]
+      const delta = choice?.delta?.content ?? choice?.message?.content ?? ''
       if (typeof delta === 'string' && delta) {
         full += delta
         opts.onDelta(delta)
       }
+      // 推理模型的思考增量（DeepSeek reasoning_content 等）
+      const reasoning = choice?.delta?.reasoning_content
+      if (typeof reasoning === 'string' && reasoning) opts.onReasoningDelta?.(reasoning)
     } catch {
       // 心跳/注释等非 JSON 载荷，静默跳过
     }
   })
+  if (!full) throw new AIError('空响应：模型未返回正文（推理模型请看思考输出是否为空）')
   return full
 }
 
@@ -403,7 +432,7 @@ async function chatAnthropic(config: AIProviderConfig, opts: ChatOptions): Promi
   }
 
   return withDeadline(CHAT_DEADLINE_MS, 'Anthropic', opts.signal, async (sig) => {
-    const res = await fetch(`${trimSlash(config.baseURL)}/messages`, {
+    const res = await fetchAI(`${trimSlash(config.baseURL)}/messages`, {
       method: 'POST',
       headers: anthropicHeaders(config),
       body: JSON.stringify(body),
@@ -434,7 +463,7 @@ async function chatStreamAnthropic(config: AIProviderConfig, opts: StreamOptions
     messages,
     stream: true,
   }
-  const res = await fetch(`${trimSlash(config.baseURL)}/messages`, {
+  const res = await fetchAI(`${trimSlash(config.baseURL)}/messages`, {
     method: 'POST',
     headers: anthropicHeaders(config),
     body: JSON.stringify(body),
@@ -450,11 +479,14 @@ async function chatStreamAnthropic(config: AIProviderConfig, opts: StreamOptions
       if (json?.type === 'content_block_delta' && json?.delta?.type === 'text_delta' && typeof json.delta.text === 'string') {
         full += json.delta.text
         opts.onDelta(json.delta.text)
+      } else if (json?.type === 'content_block_delta' && json?.delta?.type === 'thinking_delta' && typeof json.delta.thinking === 'string') {
+        opts.onReasoningDelta?.(json.delta.thinking)
       }
     } catch {
       // 非 JSON 行，跳过
     }
   })
+  if (!full) throw new AIError('Anthropic 空响应')
   return full
 }
 
@@ -478,7 +510,7 @@ async function chatJSONStreamAnthropic(config: AIProviderConfig, opts: StreamOpt
     }],
     tool_choice: { type: 'tool', name: 'emit_json' },
   }
-  const res = await fetch(`${trimSlash(config.baseURL)}/messages`, {
+  const res = await fetchAI(`${trimSlash(config.baseURL)}/messages`, {
     method: 'POST',
     headers: anthropicHeaders(config),
     body: JSON.stringify(body),

@@ -106,6 +106,8 @@ export function NewCourseDialog({
   const [live, setLive] = useState('')
   const [genErr, setGenErr] = useState('')
   const [doneInfo, setDoneInfo] = useState('')
+  // 当前课时的已用秒数（无输出时用户也能确认请求还活着）
+  const [elapsed, setElapsed] = useState(0)
   const abortRef = useRef<AbortController | null>(null)
   const filesRef = useRef<Map<string, string>>(new Map())
   const lessonsRef = useRef<PlanItem[]>([])
@@ -318,44 +320,53 @@ export function NewCourseDialog({
       if (!lesson) return
       const key = `l${li}`
       setActivity(lesson.title)
-      for (let attempt = 1; ; attempt++) {
-        setLive('')
-        setSt(key, 'running')
-        try {
-          const text = await genLesson(
-            ai,
-            {
-              topic: topicRef.current,
-              requirements: reqRef.current,
-              planText: planText(all),
-              lessonTitle: lesson.title,
-              points: lesson.points,
-              lessonNo: li,
-              total: all.length,
-              prevTitle: li > 0 ? all[li - 1].title : undefined,
-              nextTitle: li < all.length - 1 ? all[li + 1].title : undefined,
-              nextFile: li < all.length - 1 ? lessonFile(li + 1) : undefined,
-              sampleSection: skill?.sample || refMatRef.current.sample,
-              styleGuide: skill?.styleGuide,
-              // 整书改写：以现有正文为底稿按改写要求重写
-              rewriteOf: rewriteModeRef.current ? (filesRef.current.get(lessonFile(li)) ?? '') : undefined,
-              rewriteNote: rewriteModeRef.current ? rewriteNoteRef.current : undefined,
-            },
-            (chunk) => setLive((prev) => (prev + chunk).slice(-400)),
-            ac.signal,
-          )
-          filesRef.current.set(lessonFile(li), text)
-          setSt(key, 'done')
-          return
-        } catch (e) {
-          if (isAbortError(e)) throw e
-          if (attempt >= 2) {
-            setSt(key, 'error')
+      setElapsed(0)
+      const startedAt = Date.now()
+      const tick = setInterval(() => setElapsed(Math.round((Date.now() - startedAt) / 1000)), 1000)
+      try {
+        for (let attempt = 1; ; attempt++) {
+          setLive('')
+          setSt(key, 'running')
+          try {
+            const text = await genLesson(
+              ai,
+              {
+                topic: topicRef.current,
+                requirements: reqRef.current,
+                planText: planText(all),
+                lessonTitle: lesson.title,
+                points: lesson.points,
+                lessonNo: li,
+                total: all.length,
+                prevTitle: li > 0 ? all[li - 1].title : undefined,
+                nextTitle: li < all.length - 1 ? all[li + 1].title : undefined,
+                nextFile: li < all.length - 1 ? lessonFile(li + 1) : undefined,
+                sampleSection: skill?.sample || refMatRef.current.sample,
+                styleGuide: skill?.styleGuide,
+                // 整书改写：以现有正文为底稿按改写要求重写
+                rewriteOf: rewriteModeRef.current ? (filesRef.current.get(lessonFile(li)) ?? '') : undefined,
+                rewriteNote: rewriteModeRef.current ? rewriteNoteRef.current : undefined,
+              },
+              (chunk) => setLive((prev) => (prev + chunk).slice(-400)),
+              ac.signal,
+              // 思考过程（推理模型）：也上屏，用户能看到模型确实在动
+              (chunk) => setLive((prev) => (prev + chunk).slice(-400)),
+            )
+            filesRef.current.set(lessonFile(li), text)
+            setSt(key, 'done')
             return
+          } catch (e) {
+            if (isAbortError(e)) throw e
+            if (attempt >= 2) {
+              setSt(key, 'error')
+              return
+            }
+            await new Promise((r) => setTimeout(r, 1500)) // 退避后重试
+            if (ac.signal.aborted) throw new DOMException('已停止', 'AbortError')
           }
-          await new Promise((r) => setTimeout(r, 1500)) // 退避后重试
-          if (ac.signal.aborted) throw new DOMException('已停止', 'AbortError')
         }
+      } finally {
+        clearInterval(tick)
       }
     },
     [ai, setSt, skill],
@@ -844,6 +855,7 @@ export function NewCourseDialog({
         <div className="p-5">
           <p className="text-sm text-ink-soft">
             正在生成：<span className="font-semibold text-ink">{activity}</span>
+            <span className="ml-2 text-xs text-ink-faint">已用 {elapsed} 秒</span>
           </p>
           {live && (
             <pre className="mt-3 max-h-32 overflow-y-auto whitespace-pre-wrap break-all border border-ink/15 bg-paper-deep/40 p-3 text-xs leading-5 text-ink-faint">
