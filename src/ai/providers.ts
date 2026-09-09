@@ -271,11 +271,13 @@ export async function chatJSONStream(config: AIProviderConfig, opts: StreamOptio
 
 /* ───────── OpenAI 兼容 ───────── */
 
-/** 连接阶段超时：发出请求后这么久仍未收到响应头（含代理 5xx 页面）才判失败。
+/** 连接阶段超时：发出请求后这么久仍未收到响应头才判失败。部分网关要等到模型首字才回
+ *  响应头（缓冲型中转）、推理模型首字也慢，故给足 3 分钟；真正不可达的端点 TCP 层几秒内即报错。
  *  响应头到达后立刻解除，之后由 SSE 空闲看门狗接管——不限制生成总时长。 */
-const CONNECT_TIMEOUT_MS = 60_000
+const CONNECT_TIMEOUT_MS = 180_000
 
-/** fetch + 连接阶段超时（外部 signal 原样转发；超时以 AIError 中止） */
+/** fetch + 连接阶段超时；外部 signal 在整个请求生命周期内转发——包括流式 body 读取阶段
+ *  （用户点「停止」必须能掐断已建立的流），连接超时仅在响应头到达前生效 */
 async function fetchAI(url: string, init: RequestInit): Promise<Response> {
   const external = init.signal
   const ctrl = new AbortController()
@@ -284,12 +286,12 @@ async function fetchAI(url: string, init: RequestInit): Promise<Response> {
     if (external.aborted) ctrl.abort(external.reason)
     else external.addEventListener('abort', onAbort)
   }
-  const timer = setTimeout(() => ctrl.abort(new AIError(`连接超时（${Math.round(CONNECT_TIMEOUT_MS / 1000)} 秒未收到响应头）：端点不可达或代理拦截，请检查网络/地址`)), CONNECT_TIMEOUT_MS)
+  const timer = setTimeout(() => ctrl.abort(new AIError(`连接超时（${Math.round(CONNECT_TIMEOUT_MS / 1000)} 秒未收到响应头）：端点不可达、被中间层缓冲或代理拦截`)), CONNECT_TIMEOUT_MS)
   try {
     return await fetch(url, { ...init, signal: ctrl.signal })
   } finally {
     clearTimeout(timer)
-    external?.removeEventListener('abort', onAbort)
+    // 有意不移除 onAbort：响应头之后外部 abort 仍须能中止流式 body（监听器随请求对象一并回收）
   }
 }
 

@@ -173,6 +173,8 @@ export interface LessonParams {
   rewriteOf?: string
   /** 整书改写：用户的整体改写要求 */
   rewriteNote?: string
+  /** 断流续写：本课时已收到的部分正文（从断点接着写，不从头重写） */
+  continueOf?: string
 }
 
 const LESSON_SYSTEM =
@@ -198,6 +200,10 @@ export async function genLesson(
     params.rewriteNote?.trim() && `【整书改写要求（必须严格遵循）】\n${params.rewriteNote.trim().slice(0, 1500)}`,
     (params.rewriteOf?.trim() || params.rewriteNote?.trim()) &&
       '- 整书改写模式：在覆盖原文全部知识点的前提下按改写要求重写；原文中仍合适的比喻/代码/表格可直接沿用，全书文风与信息密度保持统一',
+    params.continueOf?.trim() &&
+      `【已写出的部分（上次输出在此中断）】\n${params.continueOf.trim().slice(-4000)}`,
+    params.continueOf?.trim() &&
+      '- 断点续写模式：从已写部分的结尾无缝接着往下写，不要重复已写内容、不要改动已写部分、不要再写一遍开头；只输出接续的新内容',
     params.prevTitle && `【上一课时】${params.prevTitle}`,
     params.nextTitle && `【下一课时】${params.nextTitle}（文件名 ${params.nextFile ?? ''}）`,
     '【本课时结构要求】（严格遵循）',
