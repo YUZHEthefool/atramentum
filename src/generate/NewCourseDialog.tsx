@@ -490,7 +490,9 @@ export function NewCourseDialog() {
     // 实时入库：开写前立课程记录（新书面目 + INDEX 目录 + 规划骨架），之后每课时写完即补
     // 文件——生成中途就能去阅读器看已完成的课时；中途关浏览器留下的记录也能被续写完整恢复。
     // continueCourse 场景记录已存在，无需重建。
-    if (!createdRef.current && filesRef.current.size > 1) {
+    // 注意：这里不能拿 filesRef.size 判断「有没有内容」——INDEX 刚 set 进去时 size=1，
+    // 拿 size>1 做条件会让新书永远建不了记录，全部产出滞留内存，一关页面就全丢。
+    if (!createdRef.current) {
       const title = topicRef.current.trim() || '未命名课件'
       const meta: CourseMeta = {
         id: `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
