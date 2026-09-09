@@ -519,6 +519,8 @@ export function NewCourseDialog() {
         } catch {
           /* 阅读器目录可能暂时打不开，不影响生成 */
         }
+        // 立刻通知书架：生成中的书马上可见、可点进去实时预览（不等全部写完）
+        emitCourseCreated(meta)
       }
     }
     const courseId = createdRef.current?.id
