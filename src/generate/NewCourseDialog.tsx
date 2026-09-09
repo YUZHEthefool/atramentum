@@ -114,6 +114,9 @@ export function NewCourseDialog() {
   const topicRef = useRef('')
   const reqRef = useRef('')
   const createdRef = useRef<CourseMeta | null>(null)
+  // 本次会话新建的书（区别于续写的原书）：finalize 一无所出时只允许删这种空壳记录，
+  // 续写目标的原书无论怎样都不能被删除
+  const freshlyCreatedRef = useRef(false)
 
   // 「正在生成」从进行中的课时派生（并发生成时可能多个）；须在 lessonsRef 声明之后
   const activity = useMemo(
@@ -162,6 +165,7 @@ export function NewCourseDialog() {
       if (!alive) return
       filesRef.current = files
       createdRef.current = continueCourse
+      freshlyCreatedRef.current = false // 续写的原书：绝不删除
       topicRef.current = savedPlan?.topic?.trim() || continueCourse.title
       reqRef.current = savedPlan?.requirements ?? ''
       setTopic(topicRef.current)
@@ -410,12 +414,22 @@ export function NewCourseDialog() {
       const plan = planToStore()
       const created = createdRef.current
       if (!created || files.length <= 1) {
-        // 一无所出：清掉实时入库留的空壳记录（只有 INDEX），不留垃圾书
-        if (created && files.length <= 1) {
-          await deleteCourse(created.id)
+        // 一无所出：只有「本次会话新建的书」才清空壳记录；续写的原书任何情况都不能删
+        if (created && files.length <= 1 && freshlyCreatedRef.current) {
+          try {
+            await deleteCourse(created.id)
+          } catch {
+            /* 清理失败不打扰用户，回规划页重试即可 */
+          }
           createdRef.current = null
+          freshlyCreatedRef.current = false
         }
-        setGenErr(fatalErr || '没有生成出可用内容，请检查模型与网络后重试。')
+        if (!created && files.length > 1) {
+          // 实时立记录失败退化的场景：课时在内存里，重试「开始」会再次尝试建记录入库
+          setGenErr(`课时已生成（${files.length - 1} 篇）但入库记录创建失败，请重试开始生成以完成入库。`)
+        } else {
+          setGenErr(fatalErr || '没有生成出可用内容，请检查模型与网络后重试。')
+        }
         setPhase('plan')
         return
       }
@@ -426,7 +440,14 @@ export function NewCourseDialog() {
         files: files.map((f) => f.path),
         desc: created.source === 'generated' ? `AI 生成 · ${lessonsRef.current.length} 课时` : created.desc,
       }
-      await saveCourse(meta, files, Date.now(), plan)
+      try {
+        await saveCourse(meta, files, Date.now(), plan)
+      } catch (e) {
+        // 入库失败（配额/事务）绝不能静默：课时还在 filesRef，回规划页提示后可重试收尾
+        setGenErr(`入库失败：${(e as Error).message}。课时内容已保留，可点「开始」重新收尾。`)
+        setPhase('plan')
+        return
+      }
       createdRef.current = meta
       emitCourseCreated(meta)
       setDoneInfo(`${meta.title} · ${files.length} 个文件`)
@@ -455,15 +476,20 @@ export function NewCourseDialog() {
       for (const p of [...filesRef.current.keys()]) {
         if (/^lesson\d+\.md$/.test(p) && !keep.has(p)) filesRef.current.delete(p)
       }
-    } else {
+    } else if (!filesRef.current.has('INDEX.md') || filesRef.current.size <= 1) {
+      // 全新开始；上一轮「入库记录创建失败」留下的内存课时（size>1）原样保留，点开始可再次尝试入库
       setFileStatus({})
       filesRef.current = new Map()
+    } else {
+      setFileStatus((prev) =>
+        Object.fromEntries(Object.entries(prev).map(([k, st]) => [k, st === 'error' || st === 'running' ? 'pending' : st])),
+      )
     }
     filesRef.current.set('INDEX.md', buildIndexMd(topicRef.current, all))
 
-    // 实时入库：开写前立课程记录（新书面目 + INDEX 目录），之后每课时写完即补文件——
-    // 生成中途就能去阅读器看已完成的课时。continueCourse 场景记录已存在，无需重建。
-    //（用 createCourseRecord 立记录拿不到返回 meta，直接本地构造并写入；id 同款规则）
+    // 实时入库：开写前立课程记录（新书面目 + INDEX 目录 + 规划骨架），之后每课时写完即补
+    // 文件——生成中途就能去阅读器看已完成的课时；中途关浏览器留下的记录也能被续写完整恢复。
+    // continueCourse 场景记录已存在，无需重建。
     if (!createdRef.current && filesRef.current.size > 1) {
       const title = topicRef.current.trim() || '未命名课件'
       const meta: CourseMeta = {
@@ -478,10 +504,22 @@ export function NewCourseDialog() {
         format: 'md',
         source: 'generated',
       }
-      await createCourseRecord(meta)
-      createdRef.current = meta
-      // INDEX 目录先落库，阅读器打开时目录树才有结构（课时随后逐个补文件）
-      await updateCourseFile(meta.id, 'INDEX.md', filesRef.current.get('INDEX.md') ?? '')
+      try {
+        await createCourseRecord(meta, planToStore())
+      } catch (e) {
+        // 立记录失败（配额/IndexedDB 被禁）：退化为纯内存生成，结束时再走一次入库
+        setGenErr(`实时入库不可用（${(e as Error).message}），改为生成完成后一次性入库。`)
+      }
+      if (createdRef.current === null) {
+        createdRef.current = meta
+        freshlyCreatedRef.current = true
+        // INDEX 目录先落库，阅读器打开时目录树才有结构（课时随后逐个补文件）
+        try {
+          await updateCourseFile(meta.id, 'INDEX.md', filesRef.current.get('INDEX.md') ?? '')
+        } catch {
+          /* 阅读器目录可能暂时打不开，不影响生成 */
+        }
+      }
     }
     const courseId = createdRef.current?.id
 

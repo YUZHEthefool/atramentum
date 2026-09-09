@@ -123,9 +123,10 @@ export async function saveCourse(
   invalidateTree(meta.id)
 }
 
-/** 创建课程记录（AI 著书实时入库：先立 meta 与 INDEX，课时写完逐个补文件） */
-export async function createCourseRecord(meta: CourseMeta, createdAt = Date.now()): Promise<void> {
-  await db.courses.put({ ...meta, createdAt })
+/** 创建课程记录（AI 著书实时入库：先立 meta 与 INDEX，课时写完逐个补文件）。
+ *  plan 一并落库——中途关浏览器留下的记录也能被「续写」完整恢复。 */
+export async function createCourseRecord(meta: CourseMeta, plan?: StoredPlan, createdAt = Date.now()): Promise<void> {
+  await db.courses.put({ ...meta, createdAt, plan })
   await db.files.where('courseId').equals(meta.id).delete()
   invalidateTree(meta.id)
 }
