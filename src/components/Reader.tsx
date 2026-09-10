@@ -13,7 +13,7 @@ import type { AskSeed } from '../ask/AskPanel'
 import { SettingsDialog } from './SettingsDialog'
 import { exportCourseZip } from '../io/export'
 import { useCategoryStore } from '../store/categoryStore'
-import { onCourseCreated, useGenerateStore } from '../generate/generateStore'
+import { onCourseCreated, onCourseUpdated, useGenerateStore } from '../generate/generateStore'
 import { GenerateBadge } from './GenerateBadge'
 
 type Phase = 'loading' | 'ready' | 'missing' | 'error'
@@ -244,22 +244,41 @@ export default function Reader() {
   // AI 著书写成（含续写/改写写回）→ 若正是当前书，重载目录树与正文
   useEffect(() => onCourseCreated((m) => m.id === courseId && setReloadNonce((n) => n + 1)), [courseId])
 
+  // 实时著书：每课时落库 → 只换 meta 并重建目录树（新课时长出来），
+  // 不走整页重载——正在读的正文与目录折叠状态都不打扰
+  useEffect(
+    () =>
+      onCourseUpdated((m) => {
+        if (m.id !== courseId) return
+        setMeta(m)
+        void storeFor(m.source)
+          .loadTree(courseId)
+          .then((t) => t && setTree(t))
+          .catch(() => undefined)
+      }),
+    [courseId],
+  )
+
   const flat = useMemo(() => (tree ? flattenLessons(tree.lessons) : []), [tree])
 
-  // 无 path 参数或 path 不在树内 → 定位第一节
+  // 无 path 参数 → 定位第一节；path 不在树内分两种情况：
+  // · 课时在 meta.files 里却未进树（刚写出，树仍是旧缓存）→ 只等 reload，不重定向
+  // · 路径真不存在 → 拽回第一节
   useEffect(() => {
     if (phase !== 'ready' || flat.length === 0) return
     if (currentPath && flat.some((l) => l.path === currentPath)) return
+    if (currentPath && meta?.files.includes(currentPath)) return
     setSearchParams({ path: flat[0].path }, { replace: true })
-  }, [phase, flat, currentPath, setSearchParams])
+  }, [phase, flat, currentPath, meta, setSearchParams])
 
-  // 拉取正文
+  // 拉取正文（依赖只认 source 的字符串，避免每课时落库换 meta 对象导致正文闪烁重拉）
+  const contentSource = meta?.source
   useEffect(() => {
-    if (phase !== 'ready' || !currentPath || !meta) return
+    if (phase !== 'ready' || !currentPath || !contentSource) return
     let alive = true
     setContent(null)
     setContentErr('')
-    storeFor(meta.source)
+    storeFor(contentSource)
       .readFile(courseId, currentPath)
       .then((text) => {
         if (!alive) return
@@ -270,7 +289,7 @@ export default function Reader() {
     return () => {
       alive = false
     }
-  }, [phase, courseId, currentPath, meta])
+  }, [phase, courseId, currentPath, contentSource])
 
   // AI 著书实时入库：正在后台生成的书，正文可能还没写完——失败时自动轮询重试，
   // 写完的那一刻自动出现（「文到即读」），无需手动刷新
@@ -282,9 +301,9 @@ export default function Reader() {
   }, [contentErr, contentRetry])
   useEffect(() => {
     if (contentRetry === 0) return
-    if (phase !== 'ready' || !currentPath || !meta) return
+    if (phase !== 'ready' || !currentPath || !contentSource) return
     let alive = true
-    storeFor(meta.source)
+    storeFor(contentSource)
       .readFile(courseId, currentPath)
       .then((text) => {
         if (!alive) return
@@ -297,7 +316,7 @@ export default function Reader() {
     return () => {
       alive = false
     }
-  }, [contentRetry, phase, courseId, currentPath, meta])
+  }, [contentRetry, phase, courseId, currentPath, contentSource])
 
   // 渲染 markdown/书籍内容 → DOM（md 含链接改写、heading id）
   useEffect(() => {

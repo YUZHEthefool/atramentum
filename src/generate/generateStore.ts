@@ -56,3 +56,17 @@ export function onCourseCreated(listener: CreatedListener): () => void {
   createdListeners.add(listener)
   return () => createdListeners.delete(listener)
 }
+
+/** 课时落库事件（实时入库：每写完一课发一次，带最新 meta）——
+ *  开着的阅读器据此刷新目录树（新课时出现）、书架刷新篇数；不触发整书重载 */
+type UpdatedListener = (meta: CourseMeta) => void
+const updatedListeners = new Set<UpdatedListener>()
+
+export function emitCourseUpdated(meta: CourseMeta): void {
+  for (const l of updatedListeners) l(meta)
+}
+
+export function onCourseUpdated(listener: UpdatedListener): () => void {
+  updatedListeners.add(listener)
+  return () => updatedListeners.delete(listener)
+}

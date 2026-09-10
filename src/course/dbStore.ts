@@ -158,8 +158,27 @@ export async function renameCourse(id: string, title: string): Promise<void> {
   invalidateTree(id)
 }
 
-/** 更新单文件内容（AI 改写应用） */
-export async function updateCourseFile(courseId: string, path: string, text: string): Promise<void> {
-  await db.files.put({ courseId, path, text })
+/** 更新单文件内容（AI 改写应用 / 著书实时入库）。返回更新后的课程 meta（记录不在则 null）。
+ *  实时入库必须同步把新文件追加进课程记录的 files 清单：阅读器按 meta.files 构树，
+ *  只写 files 表的话清单停在 ['INDEX.md']，书会被误判成单文件课件——
+ *  已写完的课时进不了目录，还会被「path 不在树内 → 跳第一节」重定向拽走，
+ *  直到 finalize 全量覆盖才恢复。 */
+export async function updateCourseFile(courseId: string, path: string, text: string): Promise<CourseMeta | null> {
+  let fresh: CourseMeta | null = null
+  await db.transaction('rw', db.courses, db.files, async () => {
+    await db.files.put({ courseId, path, text })
+    const rec = await db.courses.get(courseId)
+    if (rec) {
+      const files = Array.isArray(rec.files) ? rec.files : []
+      const added = !files.includes(path)
+      if (added) {
+        await db.courses.update(courseId, { files: [...files, path], fileCount: files.length + 1 })
+      }
+      const { createdAt: _createdAt, plan: _plan, ...meta } = rec
+      // 返回的 meta 必须带上刚追加的路径（rec 是更新前快照，直接返回会少一个文件）
+      fresh = added ? { ...meta, files: [...files, path], fileCount: files.length + 1 } : meta
+    }
+  })
   invalidateTree(courseId)
+  return fresh
 }

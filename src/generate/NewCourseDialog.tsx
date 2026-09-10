@@ -20,7 +20,7 @@ import { distillSkill } from './skill'
 import { DEFAULT_SKILL } from './defaultSkill'
 import { buildIndexMd, genLesson, genPlan, lessonFile, parseIndexEntries, planText, revisePlan } from './pipeline'
 import type { PlanLesson } from './pipeline'
-import { emitCourseCreated, useGenerateStore } from './generateStore'
+import { emitCourseCreated, emitCourseUpdated, useGenerateStore } from './generateStore'
 import { Overlay } from '../components/common/Overlay'
 
 type Phase = 'form' | 'plan' | 'generating' | 'done'
@@ -526,6 +526,13 @@ export function NewCourseDialog() {
       }
     }
     const courseId = createdRef.current?.id
+    const persist = courseId
+      ? (li: number, text: string) =>
+          // 实时入库：阅读器立刻可读该课时；广播更新事件让开着的目录树长出新课时
+          updateCourseFile(courseId, lessonFile(li), text).then((fresh) => {
+            if (fresh) emitCourseUpdated(fresh)
+          })
+      : undefined
 
     // 待写队列（按规划顺序出队；并发 worker 各自取活）
     const queue = all.map((_, i) => i).filter((i) => !(all[i].skip && filesRef.current.has(lessonFile(i))))
@@ -534,7 +541,7 @@ export function NewCourseDialog() {
         const li = queue.shift()
         if (li === undefined || ac.signal.aborted) return
         try {
-          await genOneLesson(li, ac, courseId ? (text) => updateCourseFile(courseId, lessonFile(li), text) : undefined)
+          await genOneLesson(li, ac, persist ? (text) => persist(li, text) : undefined)
         } catch (e) {
           if (isAbortError(e)) return
           // 断流/入库失败不终止整池：genOneLesson 内部已标 error，继续取下一个课时
@@ -558,6 +565,12 @@ export function NewCourseDialog() {
     setPhase('generating')
     setGenErr('')
     const courseId = createdRef.current?.id
+    const persist = courseId
+      ? (li: number, text: string) =>
+          updateCourseFile(courseId, lessonFile(li), text).then((fresh) => {
+            if (fresh) emitCourseUpdated(fresh)
+          })
+      : undefined
     const queue = [...failed]
     await Promise.all(
       Array.from({ length: Math.max(1, Math.min(4, parallel, queue.length)) }, async () => {
@@ -565,7 +578,7 @@ export function NewCourseDialog() {
           const li = queue.shift()
           if (li === undefined || ac.signal.aborted) return
           try {
-            await genOneLesson(li, ac, courseId ? (text) => updateCourseFile(courseId, lessonFile(li), text) : undefined)
+            await genOneLesson(li, ac, persist ? (text) => persist(li, text) : undefined)
           } catch (e) {
             if (isAbortError(e)) return
           }
